@@ -1,6 +1,6 @@
 {
-  "name": "leaflet.editable",
-  "version": "0.6.0",
+  "name": "leaflet.editable-tattek",
+  "version": "0.6.1",
   "homepage": "https://github.com/Leaflet/Leaflet.Editable",
   "authors": [
     "Yohan Boniface <ybon@openstreetmap.fr>"
