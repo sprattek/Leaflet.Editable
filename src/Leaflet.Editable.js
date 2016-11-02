@@ -13,8 +13,10 @@ L.Editable = L.Class.extend({
         polygonClass: L.Polygon,
         polylineClass: L.Polyline,
         markerClass: L.Marker,
+        rectangleClass: L.Rectangle,
         circleClass: L.Circle,
-        drawingCSSClass: 'leaflet-editable-drawing'
+        drawingCSSClass: 'leaflet-editable-drawing',
+        drawingCursor: 'crosshair'
     },
 
     initialize: function (map, options) {
@@ -23,7 +25,6 @@ L.Editable = L.Class.extend({
         this.map = map;
         this.editLayer = this.createEditLayer();
         this.featuresLayer = this.createFeaturesLayer();
-        this.newClickHandler = this.createNewClickHandler();
         this.forwardLineGuide = this.createLineGuide();
         this.backwardLineGuide = this.createLineGuide();
     },
@@ -36,20 +37,12 @@ L.Editable = L.Class.extend({
     },
 
     createLineGuide: function () {
-        var options = L.extend({dashArray: '5,10', weight: 1}, this.options.lineGuideOptions);
+        var options = L.extend({dashArray: '5,10', weight: 1, interactive: false}, this.options.lineGuideOptions);
         return L.polyline([], options);
     },
 
     createVertexIcon: function (options) {
         return L.Browser.touch ? new L.Editable.TouchVertexIcon(options) : new L.Editable.VertexIcon(options);
-    },
-
-    createNewClickHandler: function () {
-        return L.marker(this.map.getCenter(), {
-            icon: this.createVertexIcon({className: 'leaflet-div-icon leaflet-drawing-icon'}),
-            opacity: 0,
-            zIndexOffset: this._lastZIndex
-        });
     },
 
     createEditLayer: function () {
@@ -63,6 +56,7 @@ L.Editable = L.Class.extend({
     moveForwardLineGuide: function (latlng) {
         if (this.forwardLineGuide._latlngs.length) {
             this.forwardLineGuide._latlngs[1] = latlng;
+            this.forwardLineGuide._bounds.extend(latlng);
             this.forwardLineGuide.redraw();
         }
     },
@@ -70,17 +64,20 @@ L.Editable = L.Class.extend({
     moveBackwardLineGuide: function (latlng) {
         if (this.backwardLineGuide._latlngs.length) {
             this.backwardLineGuide._latlngs[1] = latlng;
+            this.backwardLineGuide._bounds.extend(latlng);
             this.backwardLineGuide.redraw();
         }
     },
 
     anchorForwardLineGuide: function (latlng) {
         this.forwardLineGuide._latlngs[0] = latlng;
+        this.forwardLineGuide._bounds.extend(latlng);
         this.forwardLineGuide.redraw();
     },
 
     anchorBackwardLineGuide: function (latlng) {
         this.backwardLineGuide._latlngs[0] = latlng;
+        this.backwardLineGuide._bounds.extend(latlng);
         this.backwardLineGuide.redraw();
     },
 
@@ -93,46 +90,83 @@ L.Editable = L.Class.extend({
     },
 
     detachForwardLineGuide: function () {
-        this.forwardLineGuide._latlngs = [];
+        this.forwardLineGuide.setLatLngs([]);
         this.editLayer.removeLayer(this.forwardLineGuide);
     },
 
     detachBackwardLineGuide: function () {
-        this.backwardLineGuide._latlngs = [];
+        this.backwardLineGuide.setLatLngs([]);
         this.editLayer.removeLayer(this.backwardLineGuide);
     },
 
-    updateNewClickHandlerZIndex: function () {
-        this._lastZIndex += 2;
-        this.newClickHandler.setZIndexOffset(this._lastZIndex);
+    blockEvents: function () {
+        // Hack: force map not to listen to other layers events while drawing.
+        if (!this._oldTargets) {
+            this._oldTargets = this.map._targets;
+            this.map._targets = {};
+        }
+    },
+
+    unblockEvents: function () {
+        if (this._oldTargets) {
+            // Reset, but keep targets created while drawing.
+            this.map._targets = L.extend(this.map._targets, this._oldTargets);
+            delete this._oldTargets;
+        }
     },
 
     registerForDrawing: function (editor) {
-        this.map.on('mousemove touchmove', editor.onMouseMove, editor);
         if (this._drawingEditor) this.unregisterForDrawing(this._drawingEditor);
+        this.map.on('mousemove touchmove', editor.onDrawingMouseMove, editor);
+        this.blockEvents();
         this._drawingEditor = editor;
-        this.editLayer.addLayer(this.newClickHandler);
-        this.newClickHandler.on('click', editor.onNewClickHandlerClicked, editor);
-        if (L.Browser.touch) this.map.on('click', editor.onTouch, editor);
+        this.map.on('mousedown', this.onMousedown, this);
+        this.map.on('mouseup', this.onMouseup, this);
         L.DomUtil.addClass(this.map._container, this.options.drawingCSSClass);
-        this.updateNewClickHandlerZIndex();
+        this.defaultMapCursor = this.map._container.style.cursor;
+        this.map._container.style.cursor = this.options.drawingCursor;
     },
 
     unregisterForDrawing: function (editor) {
+        this.unblockEvents();
+        L.DomUtil.removeClass(this.map._container, this.options.drawingCSSClass);
+        this.map._container.style.cursor = this.defaultMapCursor;
         editor = editor || this._drawingEditor;
-        this.editLayer.removeLayer(this.newClickHandler);
         if (!editor) return;
-        this.map.off('mousemove touchmove', editor.onMouseMove, editor);
-        this.newClickHandler.off('click', editor.onNewClickHandlerClicked, editor);
-        if (L.Browser.touch) this.map.off('click', editor.onTouch, editor);
+        this.map.off('mousemove touchmove', editor.onDrawingMouseMove, editor);
+        this.map.off('mousedown', this.onMousedown, this);
+        this.map.off('mouseup', this.onMouseup, this);
         if (editor !== this._drawingEditor) return;
         delete this._drawingEditor;
-        if (editor.drawing) editor.cancelDrawing();
-        L.DomUtil.removeClass(this.map._container, this.options.drawingCSSClass);
+        if (editor._drawing) editor.cancelDrawing();
+    },
+
+    onMousedown: function (e) {
+        this._mouseDown = e;
+        this._drawingEditor.onDrawingMouseDown(e);
+    },
+
+    onMouseup: function (e) {
+        if (this._mouseDown) {
+            var origin = L.point(this._mouseDown.originalEvent.clientX, this._mouseDown.originalEvent.clientY);
+            var distance = L.point(e.originalEvent.clientX, e.originalEvent.clientY).distanceTo(origin);
+            if (Math.abs(distance) < 9 * (window.devicePixelRatio || 1)) this._drawingEditor.onDrawingClick(e);
+            else this._drawingEditor.onDrawingMouseUp(e);
+        }
+        this._mouseDown = null;
+    },
+
+    drawing: function () {
+        return this._drawingEditor && this._drawingEditor.drawing();
     },
 
     stopDrawing: function () {
         this.unregisterForDrawing();
+    },
+
+    commitDrawing: function (e) {
+        if (!this._drawingEditor) return;
+        this._drawingEditor.commitDrawing(e);
     },
 
     connectCreatedToMap: function (layer) {
@@ -141,29 +175,29 @@ L.Editable = L.Class.extend({
 
     startPolyline: function (latlng, options) {
         var line = this.createPolyline([], options);
-        this.connectCreatedToMap(line);
-        var editor = line.enableEdit();
-        editor.startDrawingForward();
-        if (latlng) editor.newPointForward(latlng);
+        line.enableEdit(this.map).newShape(latlng);
         return line;
     },
 
     startPolygon: function (latlng, options) {
         var polygon = this.createPolygon([], options);
-        this.connectCreatedToMap(polygon);
-        var editor = polygon.enableEdit();
-        editor.startDrawingForward();
-        if (latlng) editor.newPointForward(latlng);
+        polygon.enableEdit(this.map).newShape(latlng);
         return polygon;
     },
 
     startMarker: function (latlng, options) {
-        latlng = latlng || this.map.getCenter();
+        latlng = latlng || this.map.getCenter().clone();
         var marker = this.createMarker(latlng, options);
-        this.connectCreatedToMap(marker);
-        var editor = marker.enableEdit();
-        editor.startDrawing();
+        marker.enableEdit(this.map).startDrawing();
         return marker;
+    },
+
+    startRectangle: function(latlng, options) {
+        var corner = latlng || L.latLng([0, 0]);
+        var bounds = new L.LatLngBounds(corner, corner);
+        var rectangle = this.createRectangle(bounds, options);
+        rectangle.enableEdit(this.map).startDrawing();
+        return rectangle;
     },
 
     startCircle: function (latlng, options) {
@@ -173,45 +207,51 @@ L.Editable = L.Class.extend({
         return circle;
     },
 
-
     startHole: function (editor, latlng) {
         editor.newHole(latlng);
     },
 
-    extendMultiPolygon: function (multi) {
-        var polygon = this.createPolygon([]);
-        multi.addLayer(polygon);
-        polygon.multi = multi;
-        var editor = polygon.enableEdit();
-        editor.startDrawingForward();
-        return polygon;
+    createLayer: function (klass, latlngs, options) {
+        options = L.Util.extend({editOptions: {editTools: this}}, options);
+        var layer = new klass(latlngs, options);
+        this.fireAndForward('editable:created', {layer: layer});
+        return layer;
     },
 
     createPolyline: function (latlngs, options) {
-        options = L.Util.extend({editOptions: {editTools: this}}, options);
-        var line = new this.options.polylineClass(latlngs, options);
-        this.fireAndForward('editable:created', {layer: line});
-        return line;
+        return this.createLayer(options && options.polylineClass || this.options.polylineClass, latlngs, options);
     },
 
     createPolygon: function (latlngs, options) {
-        options = L.Util.extend({editOptions: {editTools: this}}, options);
-        var polygon = new this.options.polygonClass(latlngs, options);
-        this.fireAndForward('editable:created', {layer: polygon});
-        return polygon;
+        return this.createLayer(options && options.polygonClass || this.options.polygonClass, latlngs, options);
     },
 
     createMarker: function (latlng, options) {
-        options = L.Util.extend({editOptions: {editTools: this}}, options);
-        var marker = new this.options.markerClass(latlng, options);
-        this.fireAndForward('editable:created', {layer: marker});
-        return marker;
+        return this.createLayer(options && options.markerClass || this.options.markerClass, latlng, options);
+    },
+
+    createRectangle: function (bounds, options) {
+        return this.createLayer(options && options.rectangleClass || this.options.rectangleClass, bounds, options);
     },
 
     createCircle: function (latlng, options) {
         return this.createLayer(options && options.circleClass || this.options.circleClass, latlng, options);
     }
 
+});
+
+L.extend(L.Editable, {
+
+    makeCancellable: function (e) {
+        e.cancel = function () {
+            e._cancelled = true;
+        };
+    }
+
+});
+
+L.Map.mergeOptions({
+    editToolsClass: L.Editable
 });
 
 L.Map.addInitHook(function () {
@@ -249,6 +289,8 @@ L.Editable.VertexMarker = L.Marker.extend({
     },
 
     initialize: function (latlng, latlngs, editor, options) {
+        // We don't use this._latlng, because on drag Leaflet replace it while
+        // we want to keep reference.
         this.latlng = latlng;
         this.latlngs = latlngs;
         this.editor = editor;
@@ -264,6 +306,7 @@ L.Editable.VertexMarker = L.Marker.extend({
         this.on('drag', this.onDrag);
         this.on('dragstart', this.onDragStart);
         this.on('dragend', this.onDragEnd);
+        this.on('mouseup', this.onMouseup);
         this.on('click', this.onClick);
         this.on('contextmenu', this.onContextMenu);
         this.on('mousedown touchstart', this.onMouseDown);
@@ -276,6 +319,7 @@ L.Editable.VertexMarker = L.Marker.extend({
         this.off('drag', this.onDrag);
         this.off('dragstart', this.onDragStart);
         this.off('dragend', this.onDragEnd);
+        this.off('mouseup', this.onMouseup);
         this.off('click', this.onClick);
         this.off('contextmenu', this.onContextMenu);
         this.off('mousedown touchstart', this.onMouseDown);
@@ -287,8 +331,8 @@ L.Editable.VertexMarker = L.Marker.extend({
         this.editor.onVertexMarkerDrag(e);
         var iconPos = L.DomUtil.getPosition(this._icon),
             latlng = this._map.layerPointToLatLng(iconPos);
-        this.latlng.lat = latlng.lat;
-        this.latlng.lng = latlng.lng;
+        this.latlng.update(latlng);
+        this._latlng = this.latlng;  // Push back to Leaflet our reference.
         this.editor.refresh();
         if (this.middleMarker) {
             this.middleMarker.updateLatLng();
@@ -314,6 +358,12 @@ L.Editable.VertexMarker = L.Marker.extend({
         this.editor.onVertexMarkerClick(e);
     },
 
+    onMouseup: function (e) {
+        L.DomEvent.stop(e);
+        e.vertex = this;
+        this.editor.map.fire('mouseup', e);
+    },
+
     onContextMenu: function (e) {
         e.vertex = this;
         this.editor.onVertexMarkerContextMenu(e);
@@ -326,10 +376,12 @@ L.Editable.VertexMarker = L.Marker.extend({
 
     delete: function () {
         var next = this.getNext();  // Compute before changing latlng
-        this.latlngs.splice(this.latlngs.indexOf(this.latlng), 1);
+        this.latlngs.splice(this.getIndex(), 1);
         this.editor.editLayer.removeLayer(this);
         this.editor.onVertexDeleted({latlng: this.latlng, vertex: this});
+        if (!this.latlngs.length) this.editor.deleteShape(this.latlngs);
         if (next) next.resetMiddleMarker();
+        this.editor.refresh();
     },
 
     getIndex: function () {
@@ -359,12 +411,13 @@ L.Editable.VertexMarker = L.Marker.extend({
     },
 
     addMiddleMarker: function (previous) {
+        if (!this.editor.hasMiddleMarkers()) return;
         previous = previous || this.getPrevious();
         if (previous && !this.middleMarker) this.middleMarker = this.editor.addMiddleMarker(previous, this, this.latlngs, this.editor);
     },
 
     addMiddleMarkers: function () {
-        if (this.editor.tools.options.skipMiddleMarkers) return;
+        if (!this.editor.hasMiddleMarkers()) return;
         var previous = this.getPrevious();
         if (previous) {
             this.addMiddleMarker(previous);
@@ -380,12 +433,20 @@ L.Editable.VertexMarker = L.Marker.extend({
         this.addMiddleMarker();
     },
 
-    _initInteraction: function () {
-        L.Marker.prototype._initInteraction.call(this);
-        L.DomEvent.on(this._icon, 'touchstart', function (e) {this._fireMouseEvent(e);}, this);
+    split: function () {
+        if (!this.editor.splitShape) return;  // Only for PolylineEditor
+        this.editor.splitShape(this.latlngs, this.getIndex());
+    },
+
+    continue: function () {
+        if (!this.editor.continueBackward) return;  // Only for PolylineEditor
+        var index = this.getIndex();
+        if (index === 0) this.editor.continueBackward(this.latlngs);
+        else if (index === this.getLastIndex()) this.editor.continueForward(this.latlngs);
     }
 
 });
+
 
 L.Editable.mergeOptions({
     vertexMarkerClass: L.Editable.VertexMarker
@@ -395,7 +456,8 @@ L.Editable.MiddleMarker = L.Marker.extend({
 
     options: {
         opacity: 0.5,
-        className: 'leaflet-div-icon leaflet-middle-icon'
+        className: 'leaflet-div-icon leaflet-middle-icon',
+        draggable: true
     },
 
     initialize: function (left, right, latlngs, editor, options) {
@@ -444,23 +506,44 @@ L.Editable.MiddleMarker = L.Marker.extend({
 
     onAdd: function (map) {
         L.Marker.prototype.onAdd.call(this, map);
-        this.on('mousedown touchstart', this.onMouseDown);
+        L.DomEvent.on(this._icon, 'mousedown touchstart', this.onMouseDown, this);
         map.on('zoomend', this.setVisibility, this);
     },
 
     onRemove: function (map) {
         delete this.right.middleMarker;
-        this.off('mousedown touchstart', this.onMouseDown);
+        L.DomEvent.off(this._icon, 'mousedown touchstart', this.onMouseDown, this);
         map.off('zoomend', this.setVisibility, this);
         L.Marker.prototype.onRemove.call(this, map);
     },
 
     onMouseDown: function (e) {
-        this.editor.onMiddleMarkerMouseDown(e, this);
+        var iconPos = L.DomUtil.getPosition(this._icon),
+            latlng = this.editor.map.layerPointToLatLng(iconPos);
+        e = {
+            originalEvent: e,
+            latlng: latlng
+        };
+        if (this.options.opacity === 0) return;
+        L.Editable.makeCancellable(e);
+        this.editor.onMiddleMarkerMouseDown(e);
+        if (e._cancelled) return;
         this.latlngs.splice(this.index(), 0, e.latlng);
         this.editor.refresh();
+        var icon = this._icon;
         var marker = this.editor.addVertexMarker(e.latlng, this.latlngs);
-        marker.dragging._draggable._onDown(e.originalEvent);  // Transfer ongoing dragging to real marker
+        /* Hack to workaround browser not firing touchend when element is no more on DOM */
+        var parent = marker._icon.parentNode;
+        parent.removeChild(marker._icon);
+        marker._icon = icon;
+        parent.appendChild(marker._icon);
+        marker._initIcon();
+        marker._initInteraction();
+        marker.setOpacity(1);
+        /* End hack */
+        // Transfer ongoing dragging to real marker
+        L.Draggable._dragging = false;
+        marker.dragging._draggable._onDown(e.originalEvent);
         this.delete();
     },
 
@@ -470,11 +553,6 @@ L.Editable.MiddleMarker = L.Marker.extend({
 
     index: function () {
         return this.latlngs.indexOf(this.right.latlng);
-    },
-
-    _initInteraction: function () {
-        L.Marker.prototype._initInteraction.call(this);
-        L.DomEvent.on(this._icon, 'touchstart', function (e) {this._fireMouseEvent(e);}, this);
     }
 
 });
@@ -496,7 +574,7 @@ L.Editable.BaseEditor = L.Class.extend({
 
     enable: function () {
         if (this._enabled) return this;
-        this.tools.editLayer.addLayer(this.editLayer);
+        if (this.isConnected()) this.tools.editLayer.addLayer(this.editLayer);
         this.onEnable();
         this._enabled = true;
         this.feature.on('remove', this.disable, this);
@@ -509,15 +587,22 @@ L.Editable.BaseEditor = L.Class.extend({
         this.tools.editLayer.removeLayer(this.editLayer);
         this.onDisable();
         delete this._enabled;
-        if (this.drawing) this.cancelDrawing();
+        if (this._drawing) this.cancelDrawing();
         return this;
+    },
+
+    drawing: function () {
+        return !!this._drawing;
+    },
+
+    hasMiddleMarkers: function () {
+        return !this.options.skipMiddleMarkers && !this.tools.options.skipMiddleMarkers;
     },
 
     fireAndForward: function (type, e) {
         e = e || {};
         e.layer = this.feature;
         this.feature.fire(type, e);
-        if (this.feature.multi) this.feature.multi.fire(type, e);
         this.tools.fireAndForward(type, e);
     },
 
@@ -545,18 +630,26 @@ L.Editable.BaseEditor = L.Class.extend({
         this.fireAndForward('editable:drawing:cancel');
     },
 
-    onCommitDrawing: function () {
-        this.fireAndForward('editable:drawing:commit');
+    onCommitDrawing: function (e) {
+        this.fireAndForward('editable:drawing:commit', e);
+    },
+
+    onDrawingMouseDown: function (e) {
+        this.fireAndForward('editable:drawing:mousedown', e);
+    },
+
+    onDrawingMouseUp: function (e) {
+        this.fireAndForward('editable:drawing:mouseup', e);
     },
 
     startDrawing: function () {
-        if (!this.drawing) this.drawing = L.Editable.FORWARD;
+        if (!this._drawing) this._drawing = L.Editable.FORWARD;
         this.tools.registerForDrawing(this);
         this.onStartDrawing();
     },
 
-    commitDrawing: function () {
-        this.onCommitDrawing();
+    commitDrawing: function (e) {
+        this.onCommitDrawing(e);
         this.endDrawing();
     },
 
@@ -566,28 +659,35 @@ L.Editable.BaseEditor = L.Class.extend({
     },
 
     endDrawing: function () {
-        this.drawing = false;
+        this._drawing = false;
         this.tools.unregisterForDrawing(this);
         this.onEndDrawing();
     },
 
-    onMouseMove: function (e) {
-        if (this.drawing) {
-            this.tools.newClickHandler.setLatLng(e.latlng);
-        }
-    },
-
-    onTouch: function (e) {
-        this.onMouseMove(e);
-        if (this.drawing) this.tools.newClickHandler._fireMouseEvent(e);
-    },
-
-    onNewClickHandlerClicked: function (e) {
+    onDrawingClick: function (e) {
+        if (!this.drawing) return;
+        L.Editable.makeCancellable(e);
         this.fireAndForward('editable:drawing:click', e);
+        if (e._cancelled) return;
+        if (!this.isConnected()) this.connect(e);
+        this.processDrawingClick(e);
     },
 
-    isNewClickValid: function (latlng) {
-        return true;
+    isConnected: function () {
+        return this.map.hasLayer(this.feature);
+    },
+
+    connect: function (e) {
+        this.tools.connectCreatedToMap(this.feature);
+        this.tools.editLayer.addLayer(this.editLayer);
+    },
+
+    onMove: function (e) {
+        this.fireAndForward('editable:drawing:move', e);
+    },
+
+    onDrawingMouseMove: function (e) {
+        this.onMove(e);
     }
 
 });
@@ -934,14 +1034,14 @@ L.Editable.CircleEditor = L.Editable.PathEditor.extend({
     },
 
     resize: function (e) {
-        var radius = this.feature._latlng.distanceTo(e.latlng)
+        var radius = this.feature._latlng.distanceTo(e.target.latlng);
         this.feature.setRadius(radius);
     },
 
     onDrawingMouseDown: function (e) {
         L.Editable.PathEditor.prototype.onDrawingMouseDown.call(this, e);
-        this._resizeLatLng.update(e.latlng);
-        this.feature._latlng.update(e.latlng);
+        this._resizeLatLng.update(e.target.latlng);
+        this.feature._latlng.update(e.target.latlng);
         this.connect();
         this.commitDrawing(e);
         // Stop dragging map.
@@ -952,7 +1052,7 @@ L.Editable.CircleEditor = L.Editable.PathEditor.extend({
 
     onDrawingMouseMove: function (e) {
         L.Editable.BaseEditor.prototype.onDrawingMouseMove.call(this, e);
-        this.feature._latlng.update(e.latlng);
+        this.feature._latlng.update(e.target.latlng);
         this.feature._latlng.__vertex.update();
     }
 
@@ -1002,11 +1102,11 @@ var EditableMixin = {
     },
 
     toggleEdit: function () {
-      if (this.editEnabled()) {
-        this.disableEdit();
-      } else {
-        this.enableEdit();
-      }
+        if (this.editEnabled()) {
+            this.disableEdit();
+        } else {
+            this.enableEdit();
+        }
     }
 
 };
@@ -1073,7 +1173,7 @@ L.Polygon.include({
                 p2 = part[k];
 
                 if (((p1.y > p.y) !== (p2.y > p.y)) &&
-                        (p.x < (p2.x - p1.x) * (p.y - p1.y) / (p2.y - p1.y) + p1.x)) {
+                    (p.x < (p2.x - p1.x) * (p.y - p1.y) / (p2.y - p1.y) + p1.x)) {
                     inside = !inside;
                 }
             }
