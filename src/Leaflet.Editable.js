@@ -1,3 +1,8 @@
+/*
+08.03.2017 - Middlemarker fix
+*/
+
+
 'use strict';
 L.Editable = L.Class.extend({
 
@@ -330,7 +335,7 @@ L.Editable.VertexMarker = L.Marker.extend({
         e.vertex = this;
         this.editor.onVertexMarkerDrag(e);
         var iconPos = L.DomUtil.getPosition(this._icon),
-            latlng = this._map.layerPointToLatLng(iconPos);
+          latlng = this._map.layerPointToLatLng(iconPos);
         this.latlng.update(latlng);
         this._latlng = this.latlng;  // Push back to Leaflet our reference.
         this.editor.refresh();
@@ -395,7 +400,7 @@ L.Editable.VertexMarker = L.Marker.extend({
     getPrevious: function () {
         if (this.latlngs.length < 2) return;
         var index = this.getIndex(),
-            previousIndex = index - 1;
+          previousIndex = index - 1;
         if (index === 0 && this.editor.CLOSED) previousIndex = this.getLastIndex();
         var previous = this.latlngs[previousIndex];
         if (previous) return previous.__vertex;
@@ -404,7 +409,7 @@ L.Editable.VertexMarker = L.Marker.extend({
     getNext: function () {
         if (this.latlngs.length < 2) return;
         var index = this.getIndex(),
-            nextIndex = index + 1;
+          nextIndex = index + 1;
         if (index === this.getLastIndex() && this.editor.CLOSED) nextIndex = 0;
         var next = this.latlngs[nextIndex];
         if (next) return next.__vertex;
@@ -456,8 +461,7 @@ L.Editable.MiddleMarker = L.Marker.extend({
 
     options: {
         opacity: 0.5,
-        className: 'leaflet-div-icon leaflet-middle-icon',
-        draggable: true
+        className: 'leaflet-div-icon leaflet-middle-icon'
     },
 
     initialize: function (left, right, latlngs, editor, options) {
@@ -474,8 +478,8 @@ L.Editable.MiddleMarker = L.Marker.extend({
 
     setVisibility: function () {
         var leftPoint = this._map.latLngToContainerPoint(this.left.latlng),
-            rightPoint = this._map.latLngToContainerPoint(this.right.latlng),
-            size = L.point(this.options.icon.options.iconSize);
+          rightPoint = this._map.latLngToContainerPoint(this.right.latlng),
+          size = L.point(this.options.icon.options.iconSize);
         if (leftPoint.distanceTo(rightPoint) < size.x * 3) {
             this.hide();
         } else {
@@ -498,52 +502,31 @@ L.Editable.MiddleMarker = L.Marker.extend({
 
     computeLatLng: function () {
         var leftPoint = this.editor.map.latLngToContainerPoint(this.left.latlng),
-            rightPoint = this.editor.map.latLngToContainerPoint(this.right.latlng),
-            y = (leftPoint.y + rightPoint.y) / 2,
-            x = (leftPoint.x + rightPoint.x) / 2;
+          rightPoint = this.editor.map.latLngToContainerPoint(this.right.latlng),
+          y = (leftPoint.y + rightPoint.y) / 2,
+          x = (leftPoint.x + rightPoint.x) / 2;
         return this.editor.map.containerPointToLatLng([x, y]);
     },
 
     onAdd: function (map) {
         L.Marker.prototype.onAdd.call(this, map);
-        L.DomEvent.on(this._icon, 'mousedown touchstart', this.onMouseDown, this);
+        this.on('mousedown touchstart', this.onMouseDown);
         map.on('zoomend', this.setVisibility, this);
     },
 
     onRemove: function (map) {
         delete this.right.middleMarker;
-        L.DomEvent.off(this._icon, 'mousedown touchstart', this.onMouseDown, this);
+        this.off('mousedown touchstart', this.onMouseDown);
         map.off('zoomend', this.setVisibility, this);
         L.Marker.prototype.onRemove.call(this, map);
     },
 
     onMouseDown: function (e) {
-        var iconPos = L.DomUtil.getPosition(this._icon),
-            latlng = this.editor.map.layerPointToLatLng(iconPos);
-        e = {
-            originalEvent: e,
-            latlng: latlng
-        };
-        if (this.options.opacity === 0) return;
-        L.Editable.makeCancellable(e);
-        this.editor.onMiddleMarkerMouseDown(e);
-        if (e._cancelled) return;
+        this.editor.onMiddleMarkerMouseDown(e, this);
         this.latlngs.splice(this.index(), 0, e.latlng);
         this.editor.refresh();
-        var icon = this._icon;
         var marker = this.editor.addVertexMarker(e.latlng, this.latlngs);
-        /* Hack to workaround browser not firing touchend when element is no more on DOM */
-        var parent = marker._icon.parentNode;
-        parent.removeChild(marker._icon);
-        marker._icon = icon;
-        parent.appendChild(marker._icon);
-        marker._initIcon();
-        marker._initInteraction();
-        marker.setOpacity(1);
-        /* End hack */
-        // Transfer ongoing dragging to real marker
-        L.Draggable._dragging = false;
-        marker.dragging._draggable._onDown(e.originalEvent);
+        marker.dragging._draggable._onDown(e.originalEvent);  // Transfer ongoing dragging to real marker
         this.delete();
     },
 
@@ -553,6 +536,11 @@ L.Editable.MiddleMarker = L.Marker.extend({
 
     index: function () {
         return this.latlngs.indexOf(this.right.latlng);
+    },
+
+    _initInteraction: function () {
+        L.Marker.prototype._initInteraction.call(this);
+        L.DomEvent.on(this._icon, 'touchstart', function (e) {this._fireMouseEvent(e);}, this);
     }
 
 });
@@ -1010,7 +998,7 @@ L.Editable.CircleEditor = L.Editable.PathEditor.extend({
     computeResizeLatLng: function () {
         // While circle is not added to the map, _radius is not set.
         var delta = (this.feature._radius || this.feature._mRadius) * Math.cos(Math.PI / 4),
-            point = this.map.project(this.feature._latlng);
+          point = this.map.project(this.feature._latlng);
         return this.map.unproject([point.x + delta, point.y - delta]);
     },
 
@@ -1120,7 +1108,7 @@ L.Polyline.include({
 
     _containsPoint: function (p, closed) {  // Copy-pasted from Leaflet
         var i, j, k, len, len2, dist, part,
-            w = this.options.weight / 2;
+          w = this.options.weight / 2;
 
         if (L.Browser.touch) {
             w += 10; // polyline click tolerance on touch devices
@@ -1152,9 +1140,9 @@ L.Polygon.include({
 
     _containsPoint: function (p) {  // Copy-pasted from Leaflet
         var inside = false,
-            part, p1, p2,
-            i, j, k,
-            len, len2;
+          part, p1, p2,
+          i, j, k,
+          len, len2;
 
         // TODO optimization: check if within bounds first
 
@@ -1173,7 +1161,7 @@ L.Polygon.include({
                 p2 = part[k];
 
                 if (((p1.y > p.y) !== (p2.y > p.y)) &&
-                    (p.x < (p2.x - p1.x) * (p.y - p1.y) / (p2.y - p1.y) + p1.x)) {
+                  (p.x < (p2.x - p1.x) * (p.y - p1.y) / (p2.y - p1.y) + p1.x)) {
                     inside = !inside;
                 }
             }
